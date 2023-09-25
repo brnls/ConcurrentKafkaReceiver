@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Worker2": {
+      "commandName": "Project",
+      "commandLineArgs": "abcdefg",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      },
+      "dotnetRunMessages": true
+    }
+  }
+}
