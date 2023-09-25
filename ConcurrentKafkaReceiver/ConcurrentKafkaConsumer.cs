@@ -117,6 +117,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
             {
                 _logger.LogInformation("Resuming partition {TopicPartition}", topicPartition);
                 _consumer.Resume(new[] { topicPartition });
+                consumer.Paused = false;
             }
 
             try
