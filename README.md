@@ -20,24 +20,28 @@ public class Worker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var consumerConfig = new ConsumerConfig()
+        var config = new ConcurrentKafkaConsumerConfig
         {
-            QueuedMaxMessagesKbytes = 1000,
-            BootstrapServers = "localhost:9092",
-            GroupId = "get-star5",
-            AutoOffsetReset = AutoOffsetReset.Latest,
-            EnableAutoOffsetStore = false,
-            EnableAutoCommit = true,
-            PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky,
+            ConsumerConfig = new ConsumerConfig()
+            {
+                QueuedMaxMessagesKbytes = 1000,
+                BootstrapServers = "localhost:9092",
+                GroupId = "group-id",
+                AutoOffsetReset = AutoOffsetReset.Latest,
+                EnableAutoOffsetStore = false,
+                EnableAutoCommit = true,
+                PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky,
+            },
+            GracefulShutdownTimeout = TimeSpan.FromSeconds(5)
         };
 
-        const string topic = "topic-name";
-        using var receiver = new ConcurrentKafkaReceiver(consumerConfig, new[] { topic }, _loggerFactory);
+        var topics = new[] { "topic-1", "topic-2" };
+        using var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory);
         _logger.LogInformation("Starting receiver");
 
 	// this will receive until the stopping token is cancelled. Messages in flight will be given time to complete.
 	//Offsets are stored each time the message handler is invoked. The cancellation token passed to the handler is the "ungraceful" shutdown token. Once the host stops, the receiver will stop consuming new messages. If the handler doesn't complete in a small amount of time, the token will trigger
-        await receiver.Receive(async (msg, token) =>
+        await consumer.Consume(async (msg, token) =>
         {
             Console.WriteLine($"Consumed event from topic {topic} with key {msg.Message.Key,-10} and value {Encoding.UTF8.GetString(msg.Message.Value)}");
             await Task.Delay(1000, token);
