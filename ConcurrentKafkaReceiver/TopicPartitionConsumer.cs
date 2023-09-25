@@ -11,10 +11,10 @@ internal class TopicPartitionConsumer : IDisposable
     private readonly ILogger<TopicPartitionConsumer> _logger;
     private readonly MessageHandler _messageHandler;
     private readonly Action<ConsumeResult<string, byte[]>> _storeOffset;
+    private readonly Action _unpauseRequest;
     private readonly Task _processTask;
     private readonly CancellationTokenSource _gracefulShutdownCts;
     private readonly CancellationTokenSource _ungraceulShutdownCts;
-    public int Messages => _channel.Reader.Count;
     public bool Paused { get; set; }
 
     public TopicPartitionConsumer(
@@ -23,19 +23,19 @@ internal class TopicPartitionConsumer : IDisposable
         CancellationToken stoppingToken,
         ILogger<TopicPartitionConsumer> logger,
         MessageHandler messageHandler,
-        Action<ConsumeResult<string, byte[]>> storeOffset)
+        Action<ConsumeResult<string, byte[]>> storeOffset,
+        Action unpauseRequest)
     {
         TopicPartition = topicPartition;
         _channel = channel;
         _logger = logger;
         _messageHandler = messageHandler;
         _storeOffset = storeOffset;
+        _unpauseRequest = unpauseRequest;
         _processTask = Task.Run(ProcessPartition);
         _gracefulShutdownCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         _ungraceulShutdownCts = new CancellationTokenSource();
     }
-
-    public TopicPartitionOffset? LatestOffset { get; private set; }
 
     public bool TryPostMessage(ConsumeResult<string, byte[]> result)
     {
@@ -58,27 +58,28 @@ internal class TopicPartitionConsumer : IDisposable
 
     private async Task ProcessPartition()
     {
-        while (true)
+        while (await _channel.Reader.WaitToReadAsync(_gracefulShutdownCts.Token))
         {
-            if (await _channel.Reader.WaitToReadAsync(_gracefulShutdownCts.Token))
+            if (!_channel.Reader.TryPeek(out var consumeResult)) continue;
+
+            _logger.LogInformation("Handling message {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
+            try
             {
-                if (!_channel.Reader.TryPeek(out var consumeResult)) continue;
+                await _messageHandler!(consumeResult, _ungraceulShutdownCts.Token);
 
-                _logger.LogInformation("{TopicPartition} - Handling message offset {Offset}", TopicPartition, consumeResult.Offset);
-                try
-                {
-                    await _messageHandler!(consumeResult, _ungraceulShutdownCts.Token);
+                _storeOffset(consumeResult);
+                _channel.Reader.TryRead(out _);
 
-                    LatestOffset = consumeResult.TopicPartitionOffset;
-                    _storeOffset(consumeResult);
-                    _channel.Reader.TryRead(out _);
-                }
-                catch (Exception ex)
+                if(Paused && _channel.Reader.Count == 0) 
                 {
-                    // message handler should be handling exceptions. If it gets here, add delay so we don't spin
-                    await Task.Delay(1000, _gracefulShutdownCts.Token);
-                    _logger.LogError(ex, "{TopicPartition} Uncaught exception while handling message.", TopicPartition);
+                    _unpauseRequest();
                 }
+            }
+            catch (Exception ex)
+            {
+                // message handler should be handling retry/dlq situations. If it gets here, add delay so we don't spin
+                await Task.Delay(TimeSpan.FromSeconds(30), _gracefulShutdownCts.Token);
+                _logger.LogError(ex, "{TopicPartitionOffset} Uncaught exception while handling message.", consumeResult.TopicPartitionOffset);
             }
         }
     }
