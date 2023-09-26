@@ -15,6 +15,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\ConcurrentKafkaReceiver\ConcurrentKafkaReceiver\ConcurrentKafkaConsumer.csproj" />
+    <ProjectReference Include="..\..\..\ConcurrentKafkaReceiver\ConcurrentKafkaConsumer.csproj" />
   </ItemGroup>
+
 </Project>

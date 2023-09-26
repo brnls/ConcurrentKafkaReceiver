@@ -28,7 +28,7 @@ public class Worker : BackgroundService
             {
                 QueuedMaxMessagesKbytes = 1000,
                 BootstrapServers = "localhost:9092",
-                GroupId = "ppause-consumer-7",
+                GroupId = "ppause-consumer-8",
                 AutoOffsetReset = AutoOffsetReset.Earliest,
                 EnableAutoOffsetStore = false,
                 EnableAutoCommit = true,

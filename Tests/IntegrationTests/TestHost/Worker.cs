@@ -57,7 +57,7 @@ public class Worker : BackgroundService
             using var scope = _serviceScopeFactory.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<TestHostContext>();
             var logChannel = Channel.CreateUnbounded<string>();
-            var processTask = Cli.Wrap("C:/code/kafka-dotnet/Worker2/bin/release/net7.0/Worker2.exe")
+            var processTask = Cli.Wrap("C:/Code/ConcurrentKafkaReceiver/Tests/IntegrationTests/Worker2/bin/release/net7.0/Worker2.exe")
                 .WithArguments(host)
                 .WithStandardOutputPipe(PipeTarget.ToDelegate(s => logChannel.Writer.TryWrite(s)))
                 .ExecuteAsync(default, stoppingToken);
