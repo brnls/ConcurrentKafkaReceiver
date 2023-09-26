@@ -105,12 +105,12 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
 
     public async Task Consume(MessageHandler messageHandler, CancellationToken token)
     {
+        await Task.Yield();
         _messageHandler = messageHandler;
 
-        using var stopTokenSource = CancellationTokenSource.CreateLinkedTokenSource(token);
         _logger.LogInformation("Subscribing to {Topics}", string.Join(", ", _topics));
         _consumer.Subscribe(_topics);
-        while (!stopTokenSource.Token.IsCancellationRequested)
+        while (!token.IsCancellationRequested)
         {
             while (_unpauseChannel.Reader.TryRead(out var topicPartition) 
                 && _topicPartitionConsumers.TryGetValue(topicPartition, out var consumer))
@@ -123,7 +123,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
             try
             {
                 var consumeResult = _consumer.Consume(100);
-                stopTokenSource.Token.ThrowIfCancellationRequested();
+                token.ThrowIfCancellationRequested();
 
                 if (consumeResult is not null)
                 {
@@ -140,7 +140,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
             }
             catch (ConsumeException ex)
             {
-                await Task.Delay(TimeSpan.FromSeconds(5), stopTokenSource.Token);
+                await Task.Delay(TimeSpan.FromSeconds(5), token);
                 _logger.LogError(ex, "Error while consuming");
             }
         }

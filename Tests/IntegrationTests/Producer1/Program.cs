@@ -23,7 +23,7 @@ Console.CancelKeyPress += (_, e) =>
 
 while (true)
 {
-    await Task.Delay(50, cts.Token);
+    await Task.Delay(2, cts.Token);
     var user = users[rnd.Next(users.Length)];
     var item = items[rnd.Next(items.Length)];
 
@@ -36,7 +36,7 @@ while (true)
             }
             else
             {
-                Console.WriteLine($"Produced event to topic {topic}: key = {user,-10} value = {item}");
+                //Console.WriteLine($"Produced event to topic {topic}: key = {user,-10} value = {item}");
                 numProduced += 1;
             }
         });
