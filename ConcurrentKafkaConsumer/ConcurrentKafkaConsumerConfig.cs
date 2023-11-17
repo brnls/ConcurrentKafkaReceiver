@@ -19,4 +19,10 @@ public class ConcurrentKafkaConsumerConfig
     /// Defaults to 5 seconds.
     /// </summary>
     public TimeSpan GracefulShutdownTimeout { get; init;  } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// The maximum number of topic partitions that will be processed concurrently.
+    /// Defaults to the environment processor count.
+    /// </summary>
+    public int MaxConcurrency { get; init; } = Environment.ProcessorCount;
 }

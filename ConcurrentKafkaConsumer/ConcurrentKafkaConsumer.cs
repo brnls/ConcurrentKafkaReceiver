@@ -16,6 +16,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
     private readonly Dictionary<TopicPartition, TopicPartitionConsumer> _topicPartitionConsumers = new();
     private MessageHandler? _messageHandler;
     private readonly Channel<TopicPartition> _unpauseChannel = Channel.CreateUnbounded<TopicPartition>();
+    private readonly SemaphoreSlim _semaphore;
 
     public ConcurrentKafkaConsumer(
         ConcurrentKafkaConsumerConfig config,
@@ -38,13 +39,14 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
         {
             throw new ArgumentException("PartitionAssignmentStrategy must be CooperativeSticky");
         }
+        _semaphore = new SemaphoreSlim(config.MaxConcurrency);
 
         _consumer = new ConsumerBuilder<string, byte[]>(config.ConsumerConfig)
             .SetPartitionsAssignedHandler((c, topicPartitions) =>
             {
                 foreach (var topicPartition in topicPartitions)
                 {
-                    _logger.LogInformation("Assigned {TopicPartition}", topicPartition);
+                    _logger.LogDebug("Assigned {TopicPartition}", topicPartition);
                     _topicPartitionConsumers[topicPartition] = new TopicPartitionConsumer(
                         topicPartition,
                         Channel.CreateBounded<ConsumeResult<string, byte[]>>(
@@ -60,16 +62,17 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
                         consumeResult => 
                         {
                             c.StoreOffset(consumeResult); 
-                            _logger.LogInformation("Stored {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
+                            _logger.LogDebug("Stored {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
                         },
-                        () => { _unpauseChannel.Writer.TryWrite(topicPartition); });
+                        () => { _unpauseChannel.Writer.TryWrite(topicPartition); },
+                        _semaphore);
                 }
             })
             .SetPartitionsRevokedHandler((c, topicPartitions) =>
             {
                 foreach(var topicPartition in topicPartitions)
                 {
-                    _logger.LogInformation("Revoked {TopicPartition}", topicPartition);
+                    _logger.LogDebug("Revoked {TopicPartition}", topicPartition);
                 }
                 // Give currently in flight messages time to stop processing before cancelling
                 var stopProcessingTokenSource = new CancellationTokenSource(config.GracefulShutdownTimeout);
@@ -92,12 +95,12 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
                     _topicPartitionConsumers.Remove(topicPartition.TopicPartition);
                 }
 
-                _logger.LogInformation("Revoke partitions completed");
+                _logger.LogDebug("Revoke partitions completed");
             })
             .SetOffsetsCommittedHandler((c, off) =>
             {
                 foreach(var com in off.Offsets)
-                    _logger.LogInformation("Committing: {TopicPartitionOffset}", com);
+                    _logger.LogDebug("Committing: {TopicPartitionOffset}", com);
             })
             .Build();
         _topics = topics;
@@ -108,14 +111,14 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
         await Task.Yield();
         _messageHandler = messageHandler;
 
-        _logger.LogInformation("Subscribing to {Topics}", string.Join(", ", _topics));
+        _logger.LogDebug("Subscribing to {Topics}", string.Join(", ", _topics));
         _consumer.Subscribe(_topics);
         while (!token.IsCancellationRequested)
         {
             while (_unpauseChannel.Reader.TryRead(out var topicPartition) 
                 && _topicPartitionConsumers.TryGetValue(topicPartition, out var consumer))
             {
-                _logger.LogInformation("Resuming partition {TopicPartition}", topicPartition);
+                _logger.LogDebug("Resuming partition {TopicPartition}", topicPartition);
                 _consumer.Resume(new[] { topicPartition });
                 consumer.Paused = false;
             }
@@ -131,14 +134,14 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
                     bool posted = topicPartitionConsumer.TryPostMessage(consumeResult);
                     if (!posted)
                     {
-                        _logger.LogInformation("Pausing partition {TopicPartition}", consumeResult.TopicPartition);
+                        _logger.LogDebug("Pausing partition {TopicPartition}", consumeResult.TopicPartition);
                         _consumer.Pause(new[] { consumeResult.TopicPartition });
                         _consumer.Seek(consumeResult.TopicPartitionOffset);
                         topicPartitionConsumer.Paused = true;
                     }
                 }
             }
-            catch (ConsumeException ex)
+            catch (Exception ex)
             {
                 await Task.Delay(TimeSpan.FromSeconds(5), token);
                 _logger.LogError(ex, "Error while consuming");
@@ -152,6 +155,6 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
         _disposeCts.Dispose();
         _consumer.Close();
         _consumer.Dispose();
-        _logger.LogInformation("consumer closed and disposed");
+        _logger.LogDebug("consumer closed and disposed");
     }
 }

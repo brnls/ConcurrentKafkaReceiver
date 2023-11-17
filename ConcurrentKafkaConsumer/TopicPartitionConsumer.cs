@@ -12,6 +12,7 @@ internal class TopicPartitionConsumer : IDisposable
     private readonly MessageHandler _messageHandler;
     private readonly Action<ConsumeResult<string, byte[]>> _storeOffset;
     private readonly Action _unpauseRequest;
+    private readonly SemaphoreSlim _semaphore;
     private readonly Task _processTask;
     private readonly CancellationTokenSource _gracefulShutdownCts;
     private readonly CancellationTokenSource _ungraceulShutdownCts;
@@ -24,7 +25,8 @@ internal class TopicPartitionConsumer : IDisposable
         ILogger<TopicPartitionConsumer> logger,
         MessageHandler messageHandler,
         Action<ConsumeResult<string, byte[]>> storeOffset,
-        Action unpauseRequest)
+        Action unpauseRequest,
+        SemaphoreSlim semaphore)
     {
         TopicPartition = topicPartition;
         _channel = channel;
@@ -32,6 +34,7 @@ internal class TopicPartitionConsumer : IDisposable
         _messageHandler = messageHandler;
         _storeOffset = storeOffset;
         _unpauseRequest = unpauseRequest;
+        _semaphore = semaphore;
         _processTask = Task.Run(ProcessPartition);
         _gracefulShutdownCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         _ungraceulShutdownCts = new CancellationTokenSource();
@@ -62,17 +65,25 @@ internal class TopicPartitionConsumer : IDisposable
         {
             if (!_channel.Reader.TryPeek(out var consumeResult)) continue;
 
-            _logger.LogInformation("Handling message {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
             try
             {
-                await _messageHandler!(consumeResult, _ungraceulShutdownCts.Token);
-
-                _storeOffset(consumeResult);
-                _channel.Reader.TryRead(out _);
-
-                if(Paused && _channel.Reader.Count == 0) 
+                try
                 {
-                    _unpauseRequest();
+                    await _semaphore.WaitAsync();
+                    _logger.LogDebug("Handling message {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
+                    await _messageHandler!(consumeResult, _ungraceulShutdownCts.Token);
+
+                    _storeOffset(consumeResult);
+                    _channel.Reader.TryRead(out _);
+
+                    if (Paused && _channel.Reader.Count == 0)
+                    {
+                        _unpauseRequest();
+                    }
+                }
+                finally
+                {
+                    _semaphore.Release();
                 }
             }
             catch (Exception ex)
