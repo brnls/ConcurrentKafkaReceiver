@@ -17,15 +17,16 @@ create table logs(
 select count(*), host from results group by host;
 select count(*), host, topic from results group by host, topic;
 
-select count(*), topic, t_partition, t_offset from results group by topic, t_partition, t_offset having count(*) > 1;
-select count(*), message_id from results group by message_id having count(*) > 1;
 select host, message from logs order by host, id asc;
 
 
-select count(*), max(t_offset), t_partition from results group by t_partition;
+select count(*), max(t_offset), topic, t_partition from results group by topic, t_partition;
 select t_partition, t_offset from results order by t_partition, t_offset;
 
 
+
+select count(*), topic, t_partition, t_offset from results group by topic, t_partition, t_offset having count(*) > 1;
+select count(*), message_id from results group by message_id having count(*) > 1;
 WITH ranked_data AS (
     SELECT
         t_partition,

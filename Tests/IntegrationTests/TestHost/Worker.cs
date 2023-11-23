@@ -20,6 +20,7 @@ public class Worker : BackgroundService
         _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
         var processTasks = Channel.CreateUnbounded<Task>();
 
+        await RunConsumer("only host", stoppingToken);
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
@@ -65,6 +66,7 @@ public class Worker : BackgroundService
 
             stoppingToken.Register(() => logChannel.Writer.Complete());
             var count = 0;
+            _logger.LogInformation("monitoring logs for {host}", host);
             while (await logChannel.Reader.WaitToReadAsync())
             {
                 while (logChannel.Reader.TryRead(out var log))

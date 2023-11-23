@@ -69,7 +69,8 @@ internal class TopicPartitionConsumer : IDisposable
             {
                 try
                 {
-                    await _semaphore.WaitAsync();
+                    await _semaphore.WaitAsync(_gracefulShutdownCts.Token);
+                    _gracefulShutdownCts.Token.ThrowIfCancellationRequested();
                     _logger.LogDebug("Handling message {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
                     await _messageHandler!(consumeResult, _ungraceulShutdownCts.Token);
 
@@ -86,11 +87,13 @@ internal class TopicPartitionConsumer : IDisposable
                     _semaphore.Release();
                 }
             }
+            catch (OperationCanceledException) when (_gracefulShutdownCts.IsCancellationRequested) { }
             catch (Exception ex)
             {
-                // message handler should be handling retry/dlq situations. If it gets here, add delay so we don't spin
-                await Task.Delay(TimeSpan.FromSeconds(30), _gracefulShutdownCts.Token);
                 _logger.LogError(ex, "{TopicPartitionOffset} Uncaught exception while handling message.", consumeResult.TopicPartitionOffset);
+                // We can't do anything useful here. The application message handler should be handling errors.
+                // If it gets here, add a delay so we don't spin.
+                await Task.Delay(TimeSpan.FromSeconds(30), _gracefulShutdownCts.Token);
             }
         }
     }

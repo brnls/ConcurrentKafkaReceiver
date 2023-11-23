@@ -13,10 +13,9 @@ public class ConcurrentKafkaConsumerConfig
     public required ConsumerConfig ConsumerConfig { get; init; }
 
     /// <summary>
-    /// The time to allow to finish current processing of messages in flight after the
-    /// cancellation token passed to "Receive" is cancelled. Once this time elapses,
-    /// the cancellation token passed to the receive message handler is cancelled.
-    /// Defaults to 5 seconds.
+    /// The time to allow in-flight messages to finish processing after the 
+    /// cancellation token passed to <see cref="ConcurrentKafkaConsumer.Consume(MessageHandler, CancellationToken)"/> 
+    /// is cancelled. After that time, the cancellation token passed to <see cref="MessageHandler"/> will be cancelled.
     /// </summary>
     public TimeSpan GracefulShutdownTimeout { get; init;  } = TimeSpan.FromSeconds(5);
 
