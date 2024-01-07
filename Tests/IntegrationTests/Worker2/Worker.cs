@@ -39,22 +39,14 @@ public class Worker : BackgroundService
             GracefulShutdownTimeout = TimeSpan.FromSeconds(2)
         };
 
-        var topics = new[] { "topic-name" };
-        //var topics = new[] { "pause-topic" };
-        using var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory);
         _logger.LogInformation("Starting receiver");
 
-        // The consume method should use its own thread (create new thread or use Task.Factory.StartNew with TaskCreationOptions.LongRunning)
-        // to avoid blocking a thread pool thread.
-        await Task.Factory.StartNew(() =>
-        {
-            try
-            {
-                // This call will consume until the stoppingToken is cancelled. Messages in flight will be given time to complete.
-                //Offsets are stored each time the message handler is invoked. The cancellation token passed to the handler is the
-                // "ungraceful" shutdown token. Once the host stops, the receiver will stop consuming new messages. If the handler
-                // doesn't complete GracefulShutdownTimeout time, the token will trigger
-                consumer.Consume(async (msg, token) =>
+        var topics = new[] { 
+            TopicConfiguration.MessageConsumer(
+                "topic-name",
+                _loggerFactory, 
+
+                async (msg, token) =>
                 {
                     using var scope = _serviceScopeFactory.CreateScope();
                     var context = scope.ServiceProvider.GetRequiredService<WorkerContext>();
@@ -68,8 +60,33 @@ public class Worker : BackgroundService
                         Host = _workerConfig.Host
                     });
                     await context.SaveChangesAsync(token);
-                    //await Task.Delay(10, token);
-                }, stoppingToken);
+                }),
+            TopicConfiguration.BatchMessageConsumer(
+                "batch-topic",
+                20,
+                _loggerFactory,
+                (batch, storePartialSuccessOffset, token) =>
+                {
+                    return Task.CompletedTask;
+                })
+        };
+
+        using var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory);
+
+        // The consume method should use its own thread (create a new thread or use Task.Factory.StartNew with TaskCreationOptions.LongRunning)
+        // to avoid blocking a thread pool thread.
+        await Task.Factory.StartNew(() =>
+        {
+            try
+            {
+                // This call will consume until the stoppingToken is cancelled. Messages in flight will be given time to complete.
+                // but new messages will not be passed to the message handler. If the handler
+                // doesn't complete in GracefulShutdownTimeout time, the token will trigger
+                //
+                // Offsets are stored each time the message handler is invoked. The cancellation token passed to the handler is the
+                // forceful shutdown token. Once the host stops, the receiver will stop consuming new messages. If the handler
+                // doesn't complete GracefulShutdownTimeout time, the token will trigger
+                consumer.Consume(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         }, TaskCreationOptions.LongRunning);

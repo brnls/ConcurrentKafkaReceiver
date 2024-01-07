@@ -41,7 +41,7 @@ public class Worker : BackgroundService
         };
 
         var topics = new[] { "topic-name1", "topic-name2" };
-        using var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory);
+            using var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory);
         _logger.LogInformation("Starting receiver");
 
         // The consume method should use its own thread (create new thread or use Task.Factory.StartNew with TaskCreationOptions.LongRunning)
@@ -56,7 +56,7 @@ public class Worker : BackgroundService
                 // doesn't complete GracefulShutdownTimeout time, the token will trigger
                 consumer.Consume(async (msg, token) =>
                 {
-                    using var scope = _serviceScopeFactory.CreateScope();
+                    lnsing var scope = _serviceScopeFactory.CreateScope();
                     var context = scope.ServiceProvider.GetRequiredService<WorkerContext>();
                     Console.WriteLine($"Consumed event from topic {msg.TopicPartitionOffset} with key {msg.Message.Key,-10} and value {Encoding.UTF8.GetString(msg.Message.Value)}");
                     //await Task.Delay(10, token);
