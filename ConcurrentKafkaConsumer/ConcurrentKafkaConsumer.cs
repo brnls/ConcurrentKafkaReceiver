@@ -126,7 +126,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
                     _logger.LogDebug("Revoked {TopicPartition}", topicPartition);
                 }
                 // Give currently in flight messages time to stop processing before cancelling
-                var stopProcessingTokenSource = new CancellationTokenSource(config.GracefulShutdownTimeout);
+                using var stopProcessingTokenSource = new CancellationTokenSource(config.GracefulShutdownTimeout);
                 var stoppedProcessing = Task.WhenAll(topicPartitions.Select(
                     x => _partitionConsumers[x.TopicPartition].WaitForStop(stopProcessingTokenSource.Token)))
                     .Wait(config.GracefulShutdownTimeout);
@@ -167,7 +167,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
     /// </summary>
     /// <param name="messageHandler"></param>
     /// <param name="token"></param>
-    public void Consume(CancellationToken token)
+    public void Consume(CancellationToken token, CancellationToken forcefulShutdownToken)
     {
         _logger.LogDebug("Subscribing to {Topics}", string.Join(", ", _topics));
         _consumer.Subscribe(_topics.Keys);
@@ -183,7 +183,6 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
                 consumer.Paused = false;
             }
 
-            Console.WriteLine($"Running on thread {Thread.CurrentThread.ManagedThreadId}");
             try
             {
                 var consumeResult = _consumer.Consume(100);
@@ -213,6 +212,8 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
                 _logger.LogError(ex, "Error while consuming");
             }
         }
+
+        //todo: wait for background processing to complete. Use forceful shutdown token
     }
 
     /// <summary>
@@ -234,7 +235,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
     class PartitionConsumerHandle : IDisposable
     {
         private readonly CancellationTokenSource _gracefulShutdownCts;
-        private readonly CancellationTokenSource _ungraceulShutdownCts;
+        private readonly CancellationTokenSource _forcefulShutdownCts;
         private readonly Channel<ConsumeResult<string, byte[]>> _channel;
 
         public PartitionConsumerHandle(
@@ -244,7 +245,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
             )
         {
             _gracefulShutdownCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            _ungraceulShutdownCts = new CancellationTokenSource();
+            _forcefulShutdownCts = new CancellationTokenSource();
 
             _channel = Channel.CreateBounded<ConsumeResult<string, byte[]>>(new BoundedChannelOptions(20)
             {
@@ -255,7 +256,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
 
             PartitionConsumer = new PartitionConsumer(
                 _gracefulShutdownCts.Token,
-                _ungraceulShutdownCts.Token,
+                _forcefulShutdownCts.Token,
                 _channel.Reader,
                 storeOffset);
 
@@ -273,7 +274,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
 
         public async Task WaitForStop(CancellationToken token)
         {
-            token.Register(() => _ungraceulShutdownCts.Cancel());
+            using var registration = token.Register(() => _forcefulShutdownCts.Cancel());
             _gracefulShutdownCts.Cancel();
             try
             {
@@ -288,7 +289,7 @@ public sealed class ConcurrentKafkaConsumer : IDisposable
         public void Dispose()
         {
             _gracefulShutdownCts.Dispose();
-            _ungraceulShutdownCts.Dispose();
+            _forcefulShutdownCts.Dispose();
         }
     }
 }
@@ -334,7 +335,7 @@ class MessageConsumer
 
         while (await _partitionConsumer.MessageChanngel.WaitToReadAsync(_partitionConsumer.GracefulShutdownToken))
         {
-            if (!_partitionConsumer.MessageChanngel.TryPeek(out var item)) return;
+            if (!_partitionConsumer.MessageChanngel.TryPeek(out var item)) continue;
             try
             {
                 await _handler(item, _partitionConsumer.UngracefulShutdownToken);
@@ -408,5 +409,6 @@ class BatchMessageConsumer
     {
         var storedOffsetIndex = _buffer.FindIndex(c => c.Offset == cr.Offset);
         _buffer.RemoveRange(0, storedOffsetIndex + 1);
+        _partitionConsumer.StoreOffset(cr);
     }
 }

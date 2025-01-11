@@ -45,7 +45,6 @@ public class Worker : BackgroundService
             TopicConfiguration.MessageConsumer(
                 "topic-name",
                 _loggerFactory, 
-
                 async (msg, token) =>
                 {
                     using var scope = _serviceScopeFactory.CreateScope();
