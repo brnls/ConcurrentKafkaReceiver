@@ -4,19 +4,22 @@ using CliWrap;
 
 namespace TestHost;
 
-public class Worker : BackgroundService
+class Worker : BackgroundService
 {
     private readonly ILogger<Worker> _logger;
     private readonly IServiceScopeFactory _serviceScopeFactory;
+    private readonly ContainersService _containersService;
 
-    public Worker(ILogger<Worker> logger, IServiceScopeFactory serviceScopeFactory)
+    public Worker(ILogger<Worker> logger, IServiceScopeFactory serviceScopeFactory, ContainersService containersService)
     {
         _logger = logger;
         _serviceScopeFactory = serviceScopeFactory;
+        _containersService = containersService;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        await _containersService.ContainersInitialized;
         _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
         var processTasks = Channel.CreateUnbounded<Task>();
 
@@ -58,7 +61,7 @@ public class Worker : BackgroundService
             using var scope = _serviceScopeFactory.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<TestHostContext>();
             var logChannel = Channel.CreateUnbounded<string>();
-            var processTask = Cli.Wrap("C:/Code/ConcurrentKafkaReceiver/Tests/IntegrationTests/Worker2/bin/release/net7.0/Worker2.exe")
+            var processTask = Cli.Wrap("C:/Code/ConcurrentKafkaReceiver/Tests/IntegrationTests/Worker2/bin/release/net9.0/Worker2.exe")
                 .WithArguments(host)
                 .WithStandardOutputPipe(PipeTarget.ToDelegate(s => logChannel.Writer.TryWrite(s)))
                 .ExecuteAsync(default, stoppingToken);

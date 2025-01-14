@@ -36,7 +36,6 @@ public class Worker : BackgroundService
                 EnableAutoCommit = true,
                 PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky,
             },
-            GracefulShutdownTimeout = TimeSpan.FromSeconds(2)
         };
 
         _logger.LogInformation("Starting receiver");
@@ -70,7 +69,7 @@ public class Worker : BackgroundService
                 })
         };
 
-        using var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory);
+        var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory);
 
         // The consume method should use its own thread (create a new thread or use Task.Factory.StartNew with TaskCreationOptions.LongRunning)
         // to avoid blocking a thread pool thread.
@@ -85,7 +84,7 @@ public class Worker : BackgroundService
                 // Offsets are stored each time the message handler is invoked. The cancellation token passed to the handler is the
                 // forceful shutdown token. Once the host stops, the receiver will stop consuming new messages. If the handler
                 // doesn't complete GracefulShutdownTimeout time, the token will trigger
-                consumer.Consume(stoppingToken);
+                consumer.Consume(stoppingToken, default);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         }, TaskCreationOptions.LongRunning);

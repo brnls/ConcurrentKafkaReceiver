@@ -5,14 +5,16 @@ const string topic = "topic-name";
 string[] users = { "eabara", "jsmith", "sgarcia", "jbernard", "htanaka", "awalther" };
 string[] items = { "book", "alarm clock", "t-shirts", "gift card", "batteries" };
 
-using var producer = new ProducerBuilder<string, string>(new Dictionary<string, string>
+var config = new ProducerConfig
 {
-    { "bootstrap.servers", "localhost:9092" }
-}).Build();
+    BootstrapServers = "localhost:9092",
+    SecurityProtocol = SecurityProtocol.Plaintext 
+};
+
+using var producer = new ProducerBuilder<string, string>(config).Build();
 
 var numProduced = 0;
 Random rnd = Random.Shared;
-const int numMessages = 10;
 
 var cts = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) =>
@@ -47,12 +49,13 @@ try
                 });
             i++;
         }
+        break;
     }
 }
 catch { }
 finally
 {
-    producer.Flush(TimeSpan.FromSeconds(10));
+    producer.Flush(TimeSpan.FromSeconds(2));
 }
 
 Console.WriteLine($"{numProduced} messages were produced to topic {topic}");
