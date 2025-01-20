@@ -1,4 +1,6 @@
-﻿class ContainersService() : BackgroundService
+﻿using TestHost;
+
+class ContainersService() : BackgroundService
 {
     private readonly TaskCompletionSource _containersInitializedTc = new();
     public Task ContainersInitialized => _containersInitializedTc.Task;
@@ -19,7 +21,8 @@
         var containerManager = new ContainerManager(
         [
             new KafkaService(),
-            new PostgresService()
+            new PostgresService(),
+            new AspireDashboardService()
         ]);
 
         await containerManager.InitAllAsync(stoppingToken);

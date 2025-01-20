@@ -8,12 +8,12 @@ namespace Worker2;
 
 public class Worker : BackgroundService
 {
-    private readonly ILogger<ConcurrentKafkaConsumer> _logger;
+    private readonly ILogger<Worker> _logger;
     private readonly ILoggerFactory _loggerFactory;
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly IConfiguration _config;
 
-    public Worker(ILogger<ConcurrentKafkaConsumer> logger, ILoggerFactory loggerFactory, IServiceScopeFactory serviceScopeFactory, IConfiguration config)
+    public Worker(ILogger<Worker> logger, ILoggerFactory loggerFactory, IServiceScopeFactory serviceScopeFactory, IConfiguration config)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -23,14 +23,14 @@ public class Worker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var host = _config["worker_host"]!;
+        var host = _config["worker_host"] ?? "undefined";
         var config = new ConcurrentKafkaConsumerConfig
         {
             ConsumerConfig = new ConsumerConfig()
             {
                 // Because we are buffering messages in memory ourselves we don't want the internal 
                 // queues to buffer as much (QueuedMaxMessagesKbytes defaults to 65536 Kb)
-                QueuedMaxMessagesKbytes = 1000,
+                //QueuedMaxMessagesKbytes = 10000,
                 BootstrapServers = "localhost:9092",
                 GroupId = "consumer-1",
                 AutoOffsetReset = AutoOffsetReset.Latest,
@@ -44,15 +44,17 @@ public class Worker : BackgroundService
 
         _logger.LogInformation("Starting receiver");
 
-        var topics = new[] { 
+        var topics = new[] {
             TopicConfiguration.MessageConsumer(
                 "topic-name",
-                _loggerFactory, 
+                _loggerFactory,
                 async (msg, token) =>
                 {
+                    using var cts = new CancellationTokenSource();
+                    await using var _ = token.Register(() => cts.CancelAfter(TimeSpan.FromSeconds(3)));
                     using var scope = _serviceScopeFactory.CreateScope();
                     var context = scope.ServiceProvider.GetRequiredService<WorkerContext>();
-                    Console.WriteLine($"Consumed event from topic {msg.TopicPartitionOffset} with key {msg.Message.Key,-10} and value {Encoding.UTF8.GetString(msg.Message.Value)}");
+                    _logger.LogInformation("Consumed event from topic {TopicPartition} with value {value}", msg.TopicPartitionOffset, Encoding.UTF8.GetString(msg.Message.Value));
                     context.Results.Add(new Result
                     {
                         Topic = msg.Topic,
@@ -61,17 +63,36 @@ public class Worker : BackgroundService
                         Partition = msg.Partition.Value,
                         Host = _config["worker_host"]!
                     });
-                    await context.SaveChangesAsync(token);
-                    await Task.Delay(10000);
+                    await context.SaveChangesAsync(cts.Token);
+                    await Task.Delay(100, cts.Token);
                 }),
-            //TopicConfiguration.BatchMessageConsumer(
-            //    "batch-topic",
-            //    20,
-            //    _loggerFactory,
-            //    (batch, storePartialSuccessOffset, token) =>
-            //    {
-            //        return Task.CompletedTask;
-            //    })
+
+            TopicConfiguration.BatchMessageConsumer(
+                "batch-topic",
+                20,
+                _loggerFactory,
+                async (batch, storePartialSuccessOffset, token) =>
+                {
+                    if(batch.Count == 0) throw new Exception("expected item in batch");
+                    using var cts = new CancellationTokenSource();
+                    await using var _ = token.Register(() => cts.CancelAfter(TimeSpan.FromSeconds(5)));
+                    using var scope = _serviceScopeFactory.CreateScope();
+                    var context = scope.ServiceProvider.GetRequiredService<WorkerContext>();
+                    foreach(var msg in batch)
+                    {
+                        context.Results.Add(new Result
+                        {
+                            Topic = msg.Topic,
+                            MessageId = msg.Message.Key,
+                            Offset = (int)msg.Offset.Value,
+                            Partition = msg.Partition.Value,
+                            Host = _config["worker_host"]!
+                        });
+                    }
+                    _logger.LogInformation("Consumed batch {TopicPartition}", batch[^1].TopicPartitionOffset);
+                    await context.SaveChangesAsync(cts.Token);
+                    await Task.Delay(100, cts.Token);
+                })
         };
 
         var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory, s =>
@@ -102,7 +123,7 @@ public class Worker : BackgroundService
                 // Offsets are stored each time the message handler is invoked. The cancellation token passed to the handler is the
                 // forceful shutdown token. Once the host stops, the receiver will stop consuming new messages. If the handler
                 // doesn't complete GracefulShutdownTimeout time, the token will trigger
-                consumer.Consume(stoppingToken, default);
+                consumer.Consume(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         }, TaskCreationOptions.LongRunning);

@@ -43,7 +43,7 @@ sealed class KafkaService : IContainerInit
         {
             var sb = new StringBuilder();
             var result = await Cli.Wrap("docker")
-                .WithArguments($"exec {_kafka.Name} kafka-topics --create --topic {topic} --partitions 3 --replication-factor 1 --bootstrap-server localhost:9092")
+                .WithArguments($"exec {_kafka.Name} kafka-topics --create --topic {topic} --partitions 7 --replication-factor 1 --bootstrap-server localhost:9092")
                 .WithStandardOutputPipe(PipeTarget.ToStream(Stream.Null))
                 .ExecuteAsync(token);
         }

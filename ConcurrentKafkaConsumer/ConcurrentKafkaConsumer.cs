@@ -1,5 +1,7 @@
 ﻿using System.Threading.Channels;
+
 using Confluent.Kafka;
+
 using Microsoft.Extensions.Logging;
 
 namespace Brnls;
@@ -17,57 +19,6 @@ public delegate Task BatchMessageHandler(
     Action<ConsumeResult<string, byte[]>> storePartialSuccessOffset,
     CancellationToken cancellationToken);
 
-public class TopicConfiguration
-{
-    public TopicConfiguration(
-        string topic,
-        Func<PartitionConsumer, Task> topicPartitionProcessor) 
-    { 
-        Topic = topic;
-        TopicPartitionProcessor = topicPartitionProcessor;
-    }
-
-    public string Topic { get; }
-
-    public Func<PartitionConsumer, Task> TopicPartitionProcessor { get; }
-
-    public static TopicConfiguration MessageConsumer(
-        string topic,
-        ILoggerFactory loggerFactory,
-        MessageHandler messageHandler)
-    {
-        return new TopicConfiguration(
-            topic,
-            partitionConsumer =>
-            {
-                return new MessageConsumer(
-                    partitionConsumer,
-                    messageHandler,
-                    loggerFactory.CreateLogger<MessageConsumer>()).ProcessPartition();
-            }
-        );
-    }
-
-    public static TopicConfiguration BatchMessageConsumer(
-        string topic,
-        int maxMessages,
-        ILoggerFactory loggerFactory,
-        BatchMessageHandler messageHandler)
-    {
-        return new TopicConfiguration(
-            topic,
-            partitionConsumer =>
-            {
-                return new BatchMessageConsumer(
-                    partitionConsumer,
-                    messageHandler,
-                    maxMessages,
-                    loggerFactory.CreateLogger<BatchMessageConsumer>()).ProcessPartition();
-            }
-        );
-    }
-}
-
 public sealed class ConcurrentKafkaConsumer
 {
     private readonly ConcurrentKafkaConsumerConfig _config;
@@ -76,7 +27,6 @@ public sealed class ConcurrentKafkaConsumer
     private readonly ILogger<ConcurrentKafkaConsumer> _logger;
     private readonly Dictionary<TopicPartition, PartitionConsumerHandle> _partitionConsumers = new();
     private readonly Channel<TopicPartition> _unpauseChannel = Channel.CreateUnbounded<TopicPartition>();
-    private readonly Channel<Task> _inflightMessageProcessing = Channel.CreateUnbounded<Task>();
 
     public ConcurrentKafkaConsumer(
         ConcurrentKafkaConsumerConfig config,
@@ -113,44 +63,49 @@ public sealed class ConcurrentKafkaConsumer
                 foreach (var topicPartition in topicPartitions)
                 {
                     _logger.LogDebug("Assigned {TopicPartition}", topicPartition);
-                    var consumerHandler = new PartitionConsumerHandle(
-                        gracefulShutdownToken,
-                        consumeResult =>
-                        {
-                            c.StoreOffset(consumeResult);
-                            _logger.LogDebug("Stored {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
-                        },
-                        _topics[topicPartition.Topic]);
-                    _partitionConsumers[topicPartition] = consumerHandler;
+                    var consumerHandle = CreatePartitionConsumerHandle(c, topicPartition, gracefulShutdownToken);
+                    _partitionConsumers[topicPartition] = consumerHandle;
                 }
             })
             .SetPartitionsRevokedHandler((c, topicPartitions) =>
             {
-                foreach (var topicPartition in topicPartitions)
+                try
                 {
-                    _logger.LogDebug("Revoked {TopicPartition}", topicPartition);
-                }
-
-                // Give currently in flight messages time to stop processing before cancelling
-                foreach (var inflightProcessTask in topicPartitions.Select(
-                    x => _partitionConsumers[x.TopicPartition].WaitForStop(default)))
-                {
-                    _inflightMessageProcessing.Writer.TryWrite(inflightProcessTask);
-                }
-
-
-                foreach (var topicPartition in topicPartitions)
-                {
-                    if (_partitionConsumers[topicPartition.TopicPartition].Paused)
+                    foreach (var topicPartition in topicPartitions)
                     {
-                        // This partition is being revoked, but we need to unpause it so that
-                        // if it gets reassigned to this consumer, processing continues.
-                        c.Resume(new[] { topicPartition.TopicPartition });
+                        _logger.LogDebug("Revoked {TopicPartition}", topicPartition);
                     }
-                    _partitionConsumers.Remove(topicPartition.TopicPartition);
-                }
 
-                _logger.LogDebug("Revoke partitions completed");
+
+                    Task.WhenAll(topicPartitions.Select(
+                        async x => {
+                            try
+                            {
+                                await _partitionConsumers[x.TopicPartition].WaitForStop().WaitAsync(TimeSpan.FromSeconds(15));
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                _logger.LogWarning("Timeout waiting for {TopicPartition} to stop processing", x.TopicPartition);
+                            }
+                        })).Wait();
+
+                    foreach (var topicPartition in topicPartitions)
+                    {
+                        if (_partitionConsumers[topicPartition.TopicPartition].Paused)
+                        {
+                            // This partition is being revoked, but we need to unpause it so that
+                            // if it gets reassigned to this consumer, processing continues.
+                            c.Resume([topicPartition.TopicPartition]);
+                        }
+                        _partitionConsumers.Remove(topicPartition.TopicPartition);
+                    }
+
+                    _logger.LogDebug("Revoke partitions completed");
+                }
+                catch(Exception ex)
+                {
+                    _logger.LogError(ex, "Error while revoking partitions");
+                }
             })
             .SetOffsetsCommittedHandler((c, off) =>
             {
@@ -175,36 +130,50 @@ public sealed class ConcurrentKafkaConsumer
 
         if(_statisticsHandler != null)
         {
-            builder.SetStatisticsHandler((c, stats) => _statisticsHandler(stats));
+            builder.SetStatisticsHandler((c, stats) =>
+                {
+                    try
+                    {
+                        _statisticsHandler(stats);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error in statistics handler");
+                    }
+                }
+            );
         }
 
         return builder.Build();
     }
 
     /// <summary>
-    /// Begin consuming messages. Use the cancellation tokens to stop consumption either gracefully
-    /// or forcefully
+    /// Begin consuming messages
     /// </summary>
-    /// <param name="gracefulShutdownToken">Causes the consumer to stop consuming new messages</param>
-    /// <param name="forcefulShutdownToken"></param>
-    public void Consume(CancellationToken gracefulShutdownToken, CancellationToken forcefulShutdownToken)
+    /// <param name="gracefulShutdownToken">Causes the consumer to stop consuming new messages. Does not cancel messages in flight</param>
+    public void Consume(CancellationToken gracefulShutdownToken)
     {
         using var consumer = BuildConsumer(gracefulShutdownToken);
-        _logger.LogDebug("Subscribing to {Topics}", string.Join(", ", _topics));
+        _logger.LogInformation("Subscribing to {Topics}", string.Join(", ", _topics.Keys));
         consumer.Subscribe(_topics.Keys);
         while (!gracefulShutdownToken.IsCancellationRequested)
         {
-            while (!gracefulShutdownToken.IsCancellationRequested
-                && _unpauseChannel.Reader.TryRead(out var topicPartition) 
-                && _partitionConsumers.TryGetValue(topicPartition, out var partitionConsumer))
-            {
-                _logger.LogDebug("Resuming partition {TopicPartition}", topicPartition);
-                consumer.Resume(new[] { topicPartition });
-                partitionConsumer.Paused = false;
-            }
-
             try
             {
+                while (!gracefulShutdownToken.IsCancellationRequested
+                    && _unpauseChannel.Reader.TryRead(out var topicPartition)
+                    && _partitionConsumers.TryGetValue(topicPartition, out var partitionConsumer))
+                {
+                    _logger.LogWarning("Resuming partition {TopicPartition}", topicPartition);
+
+                    _partitionConsumers.Remove(topicPartition);
+                    partitionConsumer.Dispose();
+                    PartitionConsumerHandle consumerHandler = CreatePartitionConsumerHandle(consumer, topicPartition, gracefulShutdownToken);
+
+                    _partitionConsumers[topicPartition] = consumerHandler;
+                    consumer.Resume([topicPartition]);
+                }
+
                 var consumeResult = consumer.Consume(100);
                 gracefulShutdownToken.ThrowIfCancellationRequested();
 
@@ -212,6 +181,7 @@ public sealed class ConcurrentKafkaConsumer
 
                 var topicPartitionConsumer = _partitionConsumers[consumeResult.TopicPartition];
                 bool posted = topicPartitionConsumer.TryPostMessage(consumeResult);
+
                 // The message will fail to post to the topic partition consumer if the bounded
                 // channel has reached capacity. When this happens we need to pause the partition
                 // to prevent unbounded memory usage. Note that this will also purge the underlying
@@ -219,10 +189,10 @@ public sealed class ConcurrentKafkaConsumer
                 // from the broker once we are ready to receive more.
                 if (!posted)
                 {
-                    _logger.LogDebug("Pausing partition {TopicPartition}", consumeResult.TopicPartition);
-                    consumer.Pause(new[] { consumeResult.TopicPartition });
+                    topicPartitionConsumer.Pause();
+                    _logger.LogWarning("Pausing partition {TopicPartition}", consumeResult.TopicPartition);
+                    consumer.Pause([consumeResult.TopicPartition]);
                     consumer.Seek(consumeResult.TopicPartitionOffset);
-                    topicPartitionConsumer.Paused = true;
                 }
             }
             catch (OperationCanceledException) when (gracefulShutdownToken.IsCancellationRequested) { }
@@ -238,10 +208,28 @@ public sealed class ConcurrentKafkaConsumer
         consumer.Close();
     }
 
+    private PartitionConsumerHandle CreatePartitionConsumerHandle(IConsumer<string, byte[]> consumer, TopicPartition topicPartition, CancellationToken gracefulShutdownToken)
+    {
+        var consumerHandler = new PartitionConsumerHandle(
+            gracefulShutdownToken,
+            consumeResult =>
+            {
+                consumer.StoreOffset(consumeResult);
+                _logger.LogDebug("Stored {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
+            },
+            _topics[topicPartition.Topic]);
+
+        consumerHandler.ProcessTask.ContinueWith(_ =>
+        {
+            if (gracefulShutdownToken.IsCancellationRequested || !consumerHandler.Paused) return;
+            _unpauseChannel.Writer.TryWrite(topicPartition);
+        }, TaskContinuationOptions.RunContinuationsAsynchronously);
+        return consumerHandler;
+    }
+
     class PartitionConsumerHandle : IDisposable
     {
         private readonly CancellationTokenSource _gracefulShutdownCts;
-        private readonly CancellationTokenSource _forcefulShutdownCts;
         private readonly Channel<ConsumeResult<string, byte[]>> _channel;
 
         public PartitionConsumerHandle(
@@ -251,9 +239,8 @@ public sealed class ConcurrentKafkaConsumer
             )
         {
             _gracefulShutdownCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            _forcefulShutdownCts = new CancellationTokenSource();
 
-            _channel = Channel.CreateBounded<ConsumeResult<string, byte[]>>(new BoundedChannelOptions(20)
+            _channel = Channel.CreateBounded<ConsumeResult<string, byte[]>>(new BoundedChannelOptions(1000)
             {
                 SingleReader = true,
                 SingleWriter = true,
@@ -262,159 +249,46 @@ public sealed class ConcurrentKafkaConsumer
 
             PartitionConsumer = new PartitionConsumer(
                 _gracefulShutdownCts.Token,
-                _forcefulShutdownCts.Token,
                 _channel.Reader,
                 storeOffset);
 
-            _processTask = partitionConsumerProcessPartition(PartitionConsumer);
+            ProcessTask = partitionConsumerProcessPartition(PartitionConsumer);
         }
 
         public PartitionConsumer PartitionConsumer { get; }
 
-        private readonly Task _processTask;
+        public Task ProcessTask { get; }
 
         public bool TryPostMessage(ConsumeResult<string, byte[]> result)
         {
             return _channel.Writer.TryWrite(result);
         }
 
-        public async Task WaitForStop(CancellationToken token)
+        public async Task WaitForStop()
         {
-            using var registration = token.Register(() => _forcefulShutdownCts.Cancel());
             _gracefulShutdownCts.Cancel();
             try
             {
-                await _processTask;
-
+                await ProcessTask;
             }
             catch (OperationCanceledException e) when (e.CancellationToken == _gracefulShutdownCts.Token) { }
         }
 
-        public bool Paused { get; set; }
+        /// <summary>
+        /// Signals to this consumer that it should finish processing the messages currently in its channel
+        /// and then stop.
+        /// </summary>
+        public void Pause()
+        {
+            _channel.Writer.TryComplete();
+            Paused = true;
+        }
+
+        public bool Paused { get; private set; }
 
         public void Dispose()
         {
             _gracefulShutdownCts.Dispose();
-            _forcefulShutdownCts.Dispose();
         }
-    }
-}
-
-public class PartitionConsumer
-{
-    public PartitionConsumer(
-        CancellationToken ungracefulShutdownToken,
-        CancellationToken gracefulShutdownToken,
-        ChannelReader<ConsumeResult<string, byte[]>> messageChanngel,
-        Action<ConsumeResult<string, byte[]>> storeOffset)
-    {
-        UngracefulShutdownToken = ungracefulShutdownToken;
-        GracefulShutdownToken = gracefulShutdownToken;
-        MessageChanngel = messageChanngel;
-        StoreOffset = storeOffset;
-    }
-
-    public CancellationToken UngracefulShutdownToken { get; }
-    public CancellationToken GracefulShutdownToken { get; }
-    public ChannelReader<ConsumeResult<string, byte[]>> MessageChanngel { get; }
-    public Action<ConsumeResult<string, byte[]>> StoreOffset { get; }
-}
-
-class MessageConsumer
-{
-    private readonly PartitionConsumer _partitionConsumer;
-    private readonly MessageHandler _handler;
-    private readonly ILogger<MessageConsumer> _logger;
-
-    public MessageConsumer(
-        PartitionConsumer partitionConsumer,
-        MessageHandler handler,
-        ILogger<MessageConsumer> logger)
-    {
-        _partitionConsumer = partitionConsumer;
-        _handler = handler;
-        _logger = logger;
-    }
-
-    public async Task ProcessPartition()
-    {
-
-        while (await _partitionConsumer.MessageChanngel.WaitToReadAsync(_partitionConsumer.GracefulShutdownToken))
-        {
-            if (!_partitionConsumer.MessageChanngel.TryPeek(out var item)) continue;
-            try
-            {
-                await _handler(item, _partitionConsumer.UngracefulShutdownToken);
-                _partitionConsumer.MessageChanngel.TryRead(out var _);
-                _partitionConsumer.StoreOffset(item);
-            }
-            catch (OperationCanceledException) when (_partitionConsumer.GracefulShutdownToken.IsCancellationRequested) { }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "{TopicPartitionOffset} Uncaught exception while processing message.", item.TopicPartitionOffset);
-                // We can't do anything useful here. The application message handler should be handling errors.
-                // If it gets here, add a delay so we don't spin.
-                await Task.Delay(TimeSpan.FromSeconds(30), _partitionConsumer.GracefulShutdownToken);
-            }
-        }
-    }
-}
-
-class BatchMessageConsumer
-{
-    private readonly PartitionConsumer _partitionConsumer;
-    private readonly BatchMessageHandler _handler;
-    private readonly int _maxBatch;
-    private readonly ILogger<BatchMessageConsumer> _logger;
-    private readonly List<ConsumeResult<string, byte[]>> _buffer;
-
-    public BatchMessageConsumer(
-        PartitionConsumer partitionConsumer,
-        BatchMessageHandler handler,
-        int maxBatch,
-        ILogger<BatchMessageConsumer> logger)
-    {
-        _partitionConsumer = partitionConsumer;
-        _handler = handler;
-        _maxBatch = maxBatch;
-        _logger = logger;
-        _buffer = new List<ConsumeResult<string, byte[]>>(maxBatch);
-    }
-
-    public async Task ProcessPartition()
-    {
-        while (_buffer.Count > 0 || await _partitionConsumer.MessageChanngel.WaitToReadAsync(_partitionConsumer.GracefulShutdownToken))
-        {
-            try
-            {
-                while (_buffer.Count < _maxBatch && _partitionConsumer.MessageChanngel.TryRead(out var item))
-                {
-                    _buffer.Add(item);
-                }
-
-                _partitionConsumer.GracefulShutdownToken.ThrowIfCancellationRequested();
-                await _handler(
-                    _buffer,
-                    StorePartialSuccessOffset,
-                    _partitionConsumer.UngracefulShutdownToken);
-                _buffer.Clear();
-                _partitionConsumer.StoreOffset(_buffer[^1]);
-            }
-            catch (OperationCanceledException) when (_partitionConsumer.GracefulShutdownToken.IsCancellationRequested) { }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "{TopicPartitionOffset} Uncaught exception while processing message batch.", _buffer[0].TopicPartitionOffset);
-                // We can't do anything useful here. The application message handler should be handling errors.
-                // If it gets here, add a delay so we don't spin.
-                await Task.Delay(TimeSpan.FromSeconds(30), _partitionConsumer.GracefulShutdownToken);
-            }
-        }
-    }
-
-    void StorePartialSuccessOffset(ConsumeResult<string, byte[]> cr)
-    {
-        var storedOffsetIndex = _buffer.FindIndex(c => c.Offset == cr.Offset);
-        _buffer.RemoveRange(0, storedOffsetIndex + 1);
-        _partitionConsumer.StoreOffset(cr);
     }
 }

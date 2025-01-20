@@ -23,7 +23,7 @@ class Worker : BackgroundService
         _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
         var processTasks = Channel.CreateUnbounded<Task>();
 
-        await RunConsumer("only host", stoppingToken);
+        _ = RunConsumer("only host", stoppingToken);
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
@@ -32,7 +32,7 @@ class Worker : BackgroundService
                 _logger.LogInformation("starting new worker");
                 processTasks.Writer.TryWrite(Task.Run(async () =>
                 {
-                    var host = Guid.NewGuid().ToString();
+                    var host = Guid.NewGuid().ToString()[..6];
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
                     using var l = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, cts.Token);
                     await RunConsumer(host, l.Token);
@@ -62,7 +62,9 @@ class Worker : BackgroundService
             using var scope = _serviceScopeFactory.CreateScope();
             var context = scope.ServiceProvider.GetRequiredService<TestHostContext>();
             var logChannel = Channel.CreateUnbounded<string>();
-            var processTask = Cli.Wrap("C:/Code/ConcurrentKafkaReceiver/Tests/IntegrationTests/Worker2/bin/release/net9.0/Worker2.exe")
+            var dir = "C:/Code/ConcurrentKafkaReceiver/Tests/IntegrationTests/Worker2/bin/release/net9.0/";
+            var processTask = Cli.Wrap(Path.Combine(dir, "Worker2.exe"))
+                .WithWorkingDirectory(dir)
                 .WithEnvironmentVariables(b => b.Set("worker_host", host))
                 .WithStandardOutputPipe(PipeTarget.ToDelegate(s => logChannel.Writer.TryWrite(s)))
                 .ExecuteAsync(default, stoppingToken);

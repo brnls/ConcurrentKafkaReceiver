@@ -1,19 +1,19 @@
 ﻿using Confluent.Kafka;
 
-const string topic = "topic-name";
+string[] topics = ["topic-name", "batch-topic"];
+//string[] topics = ["batch-topic"];
 
-string[] users = { "eabara", "jsmith", "sgarcia", "jbernard", "htanaka", "awalther" };
-string[] items = { "book", "alarm clock", "t-shirts", "gift card", "batteries" };
+string[] users = ["eabara", "jsmith", "sgarcia", "jbernard", "htanaka", "awalther"];
+string[] items = ["book", "alarm clock", "t-shirts", "gift card", "batteries"];
 
 var config = new ProducerConfig
 {
     BootstrapServers = "localhost:9092",
-    SecurityProtocol = SecurityProtocol.Plaintext 
+    SecurityProtocol = SecurityProtocol.Plaintext
 };
 
 using var producer = new ProducerBuilder<string, string>(config).Build();
 
-var numProduced = 0;
 Random rnd = Random.Shared;
 
 var cts = new CancellationTokenSource();
@@ -23,39 +23,35 @@ Console.CancelKeyPress += (_, e) =>
     e.Cancel = true;
 };
 
-try
-{
-    while (true)
-    {
-        await Task.Delay(2, cts.Token);
 
-        var i = 0;
-        while (i < 10)
+
+var tasks = topics.Select(x => Task.Run(async () =>
+{
+    var numProduced = 0;
+    try
+    {
+        while (numProduced <= 1000)
         {
             cts.Token.ThrowIfCancellationRequested();
             var user = users[rnd.Next(users.Length)];
             var item = items[rnd.Next(items.Length)];
-            producer.Produce(topic, new Message<string, string> { Key = Guid.NewGuid().ToString(), Value = item },
+            producer.Produce(x, new Message<string, string> { Key = Guid.NewGuid().ToString(), Value = item },
                 (deliveryReport) =>
                 {
                     if (deliveryReport.Error.Code != ErrorCode.NoError)
                     {
                         Console.WriteLine($"Failed to deliver message: {deliveryReport.Error.Reason}");
                     }
-                    else
-                    {
-                        //Console.WriteLine($"Produced event to topic {topic}: key = {user,-10} value = {item}");
-                        numProduced += 1;
-                    }
                 });
-            i++;
+            numProduced += 1;
         }
     }
-}
-catch { }
-finally
-{
-    producer.Flush();
-}
-
-Console.WriteLine($"{numProduced} messages were produced to topic {topic}");
+    catch { }
+    finally
+    {
+        using var ctsFlush = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        producer.Flush(ctsFlush.Token);
+        Console.WriteLine($"{numProduced} messages were produced to topic {x}");
+    }
+}));
+await Task.WhenAll(tasks);
