@@ -71,9 +71,9 @@ public class TopicConfiguration
 public sealed class ConcurrentKafkaConsumer
 {
     private readonly ConcurrentKafkaConsumerConfig _config;
+    private readonly Action<string>? _statisticsHandler;
     private readonly Dictionary<string, Func<PartitionConsumer, Task>> _topics;
     private readonly ILogger<ConcurrentKafkaConsumer> _logger;
-    private readonly CancellationTokenSource _disposeCts = new CancellationTokenSource();
     private readonly Dictionary<TopicPartition, PartitionConsumerHandle> _partitionConsumers = new();
     private readonly Channel<TopicPartition> _unpauseChannel = Channel.CreateUnbounded<TopicPartition>();
     private readonly Channel<Task> _inflightMessageProcessing = Channel.CreateUnbounded<Task>();
@@ -81,7 +81,8 @@ public sealed class ConcurrentKafkaConsumer
     public ConcurrentKafkaConsumer(
         ConcurrentKafkaConsumerConfig config,
         IEnumerable<TopicConfiguration> topics,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        Action<string>? statisticsHandler = null)
     {
         _logger = loggerFactory.CreateLogger<ConcurrentKafkaConsumer>();
         if (config.ConsumerConfig.EnableAutoCommit != true)
@@ -100,12 +101,13 @@ public sealed class ConcurrentKafkaConsumer
         }
 
         _config = config;
+        _statisticsHandler = statisticsHandler;
         _topics = topics.ToDictionary(x => x.Topic, x => x.TopicPartitionProcessor);
     }
 
     private IConsumer<string, byte[]> BuildConsumer(CancellationToken gracefulShutdownToken)
     {
-        return new ConsumerBuilder<string, byte[]>(_config.ConsumerConfig)
+        var builder = new ConsumerBuilder<string, byte[]>(_config.ConsumerConfig)
             .SetPartitionsAssignedHandler((c, topicPartitions) =>
             {
                 foreach (var topicPartition in topicPartitions)
@@ -159,7 +161,24 @@ public sealed class ConcurrentKafkaConsumer
             {
                 _logger.LogError(new KafkaException(e), e.Reason);
             })
-            .Build();
+            .SetLogHandler((c, l) =>
+            {
+                if((int)l.Level <= 4)
+                {
+                    _logger.LogError(l.Message);
+                }
+                else
+                {
+                    _logger.LogInformation(l.Message);
+                }
+            });
+
+        if(_statisticsHandler != null)
+        {
+            builder.SetStatisticsHandler((c, stats) => _statisticsHandler(stats));
+        }
+
+        return builder.Build();
     }
 
     /// <summary>

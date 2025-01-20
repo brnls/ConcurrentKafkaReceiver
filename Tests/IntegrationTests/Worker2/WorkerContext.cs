@@ -7,6 +7,7 @@ public class WorkerContext : DbContext
     public WorkerContext(DbContextOptions options) : base(options) { }
 
     public DbSet<Result> Results { get; set; }
+    public DbSet<Stats> Stats { get; set; }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -26,6 +27,11 @@ public class WorkerContext : DbContext
         {
             o.ToTable("logs");
             o.HasKey(x => x.Id);
+        });
+
+        modelBuilder.Entity<Stats>(o =>
+        {
+            o.ToTable("stats");
         });
 
         base.OnModelCreating(modelBuilder);
@@ -48,4 +54,12 @@ public class Log
     public int Id { get; set; }
     public string Host { get; set; } = null!;
     public string Message { get; set; } = null!;
+}
+
+public class Stats
+{
+    public int Id { get; set; }
+    public string Host { get; set; } = null!;
+    public string Value { get; set; } = null!;
+    public DateTime CreatedAt { get; set; }
 }

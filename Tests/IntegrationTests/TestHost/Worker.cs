@@ -29,6 +29,7 @@ class Worker : BackgroundService
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
+                _logger.LogInformation("starting new worker");
                 processTasks.Writer.TryWrite(Task.Run(async () =>
                 {
                     var host = Guid.NewGuid().ToString();
@@ -62,7 +63,7 @@ class Worker : BackgroundService
             var context = scope.ServiceProvider.GetRequiredService<TestHostContext>();
             var logChannel = Channel.CreateUnbounded<string>();
             var processTask = Cli.Wrap("C:/Code/ConcurrentKafkaReceiver/Tests/IntegrationTests/Worker2/bin/release/net9.0/Worker2.exe")
-                .WithArguments(host)
+                .WithEnvironmentVariables(b => b.Set("worker_host", host))
                 .WithStandardOutputPipe(PipeTarget.ToDelegate(s => logChannel.Writer.TryWrite(s)))
                 .ExecuteAsync(default, stoppingToken);
 
@@ -81,6 +82,7 @@ class Worker : BackgroundService
                         await context.SaveChangesAsync();
                     }
                 }
+                await context.SaveChangesAsync();
             }
             await context.SaveChangesAsync();
             await processTask;

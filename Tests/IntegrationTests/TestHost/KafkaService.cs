@@ -26,7 +26,7 @@ sealed class KafkaService : IContainerInit
                 ["KAFKA_PROCESS_ROLES"] = "broker,controller",
                 ["KAFKA_NODE_ID"] = "1",
                 ["KAFKA_CONTROLLER_QUORUM_VOTERS"] = "1@localhost:29093",
-                ["KAFKA_LISTENERS"] = "PLAINTEXT://localhost:29092,CONTROLLER://localhost:29093,PLAINTEXT_HOST://localhost:9092",
+                ["KAFKA_LISTENERS"] = "PLAINTEXT://localhost:29092,CONTROLLER://localhost:29093,PLAINTEXT_HOST://0.0.0.0:9092",
                 ["KAFKA_INTER_BROKER_LISTENER_NAME"] = "PLAINTEXT",
                 ["KAFKA_CONTROLLER_LISTENER_NAMES"] = "CONTROLLER",
                 ["KAFKA_LOG_DIRS"] = "/tmp/kraft-combined-logs",
@@ -39,18 +39,14 @@ sealed class KafkaService : IContainerInit
     public async Task InitAsync(CancellationToken token)
     {
         await _kafka.StartAsync(token);
-        try
+        foreach (var topic in new List<string> { "topic-name", "batch-topic" })
         {
-            foreach (var topic in new List<string> { "topic-name", "batch-topic" })
-            {
-                var sb = new StringBuilder();
-                var result = await Cli.Wrap("docker")
-                    .WithArguments($"exec {_kafka.Name} kafka-topics --create --topic {topic} --partitions 7 --replication-factor 1 --bootstrap-server localhost:9092")
-                    .WithStandardOutputPipe(PipeTarget.ToStream(Stream.Null))
-                    .ExecuteAsync(token);
-            }
+            var sb = new StringBuilder();
+            var result = await Cli.Wrap("docker")
+                .WithArguments($"exec {_kafka.Name} kafka-topics --create --topic {topic} --partitions 3 --replication-factor 1 --bootstrap-server localhost:9092")
+                .WithStandardOutputPipe(PipeTarget.ToStream(Stream.Null))
+                .ExecuteAsync(token);
         }
-        catch { }
     }
 
     public async ValueTask DisposeAsync()

@@ -4,7 +4,8 @@
       "commandName": "Project",
       "commandLineArgs": "abcdefg",
       "environmentVariables": {
-        "DOTNET_ENVIRONMENT": "Development"
+        "DOTNET_ENVIRONMENT": "Development",
+        "worker_host": "debug host"
       },
       "dotnetRunMessages": true
     }

@@ -30,6 +30,12 @@ sealed class PostgresService : IContainerInit
                 host text not null,
                 message text not null,
                 created_at timestamptz default now());
+
+            create table stats(
+                id bigint primary key generated always as identity,
+                host text not null,
+                value text not null,
+                created_at timestamptz default now());
             """;
 
         await _postgres.StartAsync(token);

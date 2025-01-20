@@ -32,6 +32,7 @@ try
         var i = 0;
         while (i < 10)
         {
+            cts.Token.ThrowIfCancellationRequested();
             var user = users[rnd.Next(users.Length)];
             var item = items[rnd.Next(items.Length)];
             producer.Produce(topic, new Message<string, string> { Key = Guid.NewGuid().ToString(), Value = item },
@@ -49,13 +50,12 @@ try
                 });
             i++;
         }
-        break;
     }
 }
 catch { }
 finally
 {
-    producer.Flush(TimeSpan.FromSeconds(2));
+    producer.Flush();
 }
 
 Console.WriteLine($"{numProduced} messages were produced to topic {topic}");

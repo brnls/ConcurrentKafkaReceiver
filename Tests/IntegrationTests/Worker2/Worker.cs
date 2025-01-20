@@ -2,6 +2,7 @@ using Brnls;
 
 using Confluent.Kafka;
 using System.Text;
+using System.Text.Json;
 
 namespace Worker2;
 
@@ -10,18 +11,19 @@ public class Worker : BackgroundService
     private readonly ILogger<ConcurrentKafkaConsumer> _logger;
     private readonly ILoggerFactory _loggerFactory;
     private readonly IServiceScopeFactory _serviceScopeFactory;
-    private readonly WorkerConfig _workerConfig;
+    private readonly IConfiguration _config;
 
-    public Worker(ILogger<ConcurrentKafkaConsumer> logger, ILoggerFactory loggerFactory, IServiceScopeFactory serviceScopeFactory, WorkerConfig workerConfig)
+    public Worker(ILogger<ConcurrentKafkaConsumer> logger, ILoggerFactory loggerFactory, IServiceScopeFactory serviceScopeFactory, IConfiguration config)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
         _serviceScopeFactory = serviceScopeFactory;
-        _workerConfig = workerConfig;
+        _config = config;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var host = _config["worker_host"]!;
         var config = new ConcurrentKafkaConsumerConfig
         {
             ConsumerConfig = new ConsumerConfig()
@@ -35,6 +37,8 @@ public class Worker : BackgroundService
                 EnableAutoOffsetStore = false,
                 EnableAutoCommit = true,
                 PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky,
+                StatisticsIntervalMs = 5000,
+                //Debug = "consumer,topic"
             },
         };
 
@@ -55,21 +59,35 @@ public class Worker : BackgroundService
                         MessageId = msg.Message.Key,
                         Offset = (int)msg.Offset.Value,
                         Partition = msg.Partition.Value,
-                        Host = _workerConfig.Host
+                        Host = _config["worker_host"]!
                     });
                     await context.SaveChangesAsync(token);
+                    await Task.Delay(10000);
                 }),
-            TopicConfiguration.BatchMessageConsumer(
-                "batch-topic",
-                20,
-                _loggerFactory,
-                (batch, storePartialSuccessOffset, token) =>
-                {
-                    return Task.CompletedTask;
-                })
+            //TopicConfiguration.BatchMessageConsumer(
+            //    "batch-topic",
+            //    20,
+            //    _loggerFactory,
+            //    (batch, storePartialSuccessOffset, token) =>
+            //    {
+            //        return Task.CompletedTask;
+            //    })
         };
 
-        var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory);
+        var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory, s =>
+        {
+            using var scope = _serviceScopeFactory.CreateScope();
+            var json = JsonDocument.Parse(s);
+            var workerContext = scope.ServiceProvider.GetRequiredService<WorkerContext>();
+            workerContext.Stats.Add(new Stats
+            {
+                Host = host,
+                Value = JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true }),
+                CreatedAt = DateTime.UtcNow,
+            });
+            workerContext.SaveChanges();
+
+        });
 
         // The consume method should use its own thread (create a new thread or use Task.Factory.StartNew with TaskCreationOptions.LongRunning)
         // to avoid blocking a thread pool thread.

@@ -9,10 +9,7 @@
 
     public async Task InitAllAsync(CancellationToken token)
     {
-        foreach (var service in _services)
-        {
-            await service.InitAsync(token);
-        }
+        await Task.WhenAll(_services.Select(service => service.InitAsync(token)));
     }
 
     public async ValueTask DisposeAsync()
