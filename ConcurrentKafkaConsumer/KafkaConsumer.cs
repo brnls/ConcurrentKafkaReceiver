@@ -6,12 +6,6 @@ using Microsoft.Extensions.Logging;
 
 namespace Brnls;
 
-/// <summary>
-/// The handler that will be invoked for each message consumed from
-/// kafka. The cancellation token passed to this method will be cancelled
-/// only after the <see cref="ConcurrentKafkaConsumerConfig.GracefulShutdownTimeout"/>
-/// has elapsed to allow completing processing for currently in-flight messages.
-/// </summary>
 public delegate Task MessageHandler(ConsumeResult<string, byte[]> result, CancellationToken cancellationToken);
 
 public delegate Task BatchMessageHandler(
@@ -19,45 +13,49 @@ public delegate Task BatchMessageHandler(
     Action<ConsumeResult<string, byte[]>> storePartialSuccessOffset,
     CancellationToken cancellationToken);
 
-public sealed class ConcurrentKafkaConsumer
+/// <summary>
+/// Handles messages for a specific topic partition. The task returned should
+/// only complete when all processing is completed after <see cref="TopicPartitionConsumer.GracefulShutdownToken"/>
+/// </summary>
+public delegate Task HandleTopicPartition(TopicPartitionConsumer topicPartitionConsumer);
+
+public sealed class KafkaConsumer
 {
-    private readonly ConcurrentKafkaConsumerConfig _config;
+    private readonly ConsumerConfig _config;
     private readonly Action<string>? _statisticsHandler;
-    private readonly Dictionary<string, Func<PartitionConsumer, Task>> _topics;
-    private readonly ILogger<ConcurrentKafkaConsumer> _logger;
-    private readonly Dictionary<TopicPartition, PartitionConsumerHandle> _partitionConsumers = new();
+    private readonly IEnumerable<string> _topics;
+    private readonly HandleTopicPartition _handleTopicPartition;
+    private readonly ILogger<KafkaConsumer> _logger;
+    private readonly Dictionary<TopicPartition, TopicPartitionConsumerHandle> _partitionConsumers = new();
     private readonly Channel<TopicPartition> _unpauseChannel = Channel.CreateUnbounded<TopicPartition>();
 
-    public ConcurrentKafkaConsumer(
-        ConcurrentKafkaConsumerConfig config,
-        IEnumerable<TopicConfiguration> topics,
+    public KafkaConsumer(
+        ConsumerConfig config,
+        IEnumerable<string> topics,
         ILoggerFactory loggerFactory,
+        HandleTopicPartition handleTopicPartition,
         Action<string>? statisticsHandler = null)
     {
-        _logger = loggerFactory.CreateLogger<ConcurrentKafkaConsumer>();
-        if (config.ConsumerConfig.EnableAutoCommit != true)
+        _logger = loggerFactory.CreateLogger<KafkaConsumer>();
+        if (config.EnableAutoCommit != true)
         {
             throw new ArgumentException("EnableAutoCommit must be true");
         }
 
-        if (config.ConsumerConfig.EnableAutoOffsetStore != false)
+        if (config.EnableAutoOffsetStore != false)
         {
             throw new ArgumentException("EnableAutoOffsetStore must be false");
         }
 
-        if (config.ConsumerConfig.PartitionAssignmentStrategy != PartitionAssignmentStrategy.CooperativeSticky)
-        {
-            throw new ArgumentException("PartitionAssignmentStrategy must be CooperativeSticky");
-        }
-
         _config = config;
         _statisticsHandler = statisticsHandler;
-        _topics = topics.ToDictionary(x => x.Topic, x => x.TopicPartitionProcessor);
+        _topics = topics;
+        _handleTopicPartition = handleTopicPartition;
     }
 
     private IConsumer<string, byte[]> BuildConsumer(CancellationToken gracefulShutdownToken)
     {
-        var builder = new ConsumerBuilder<string, byte[]>(_config.ConsumerConfig)
+        var builder = new ConsumerBuilder<string, byte[]>(_config)
             .SetPartitionsAssignedHandler((c, topicPartitions) =>
             {
                 foreach (var topicPartition in topicPartitions)
@@ -97,7 +95,6 @@ public sealed class ConcurrentKafkaConsumer
                             // if it gets reassigned to this consumer, processing continues.
                             c.Resume([topicPartition.TopicPartition]);
                         }
-                        _partitionConsumers.Remove(topicPartition.TopicPartition);
                     }
 
                     _logger.LogDebug("Revoke partitions completed");
@@ -154,8 +151,8 @@ public sealed class ConcurrentKafkaConsumer
     public void Consume(CancellationToken gracefulShutdownToken)
     {
         using var consumer = BuildConsumer(gracefulShutdownToken);
-        _logger.LogInformation("Subscribing to {Topics}", string.Join(", ", _topics.Keys));
-        consumer.Subscribe(_topics.Keys);
+        _logger.LogInformation("Subscribing to {Topics}", string.Join(", ", _topics));
+        consumer.Subscribe(_topics);
         while (!gracefulShutdownToken.IsCancellationRequested)
         {
             try
@@ -168,7 +165,7 @@ public sealed class ConcurrentKafkaConsumer
 
                     _partitionConsumers.Remove(topicPartition);
                     partitionConsumer.Dispose();
-                    PartitionConsumerHandle consumerHandler = CreatePartitionConsumerHandle(consumer, topicPartition, gracefulShutdownToken);
+                    TopicPartitionConsumerHandle consumerHandler = CreatePartitionConsumerHandle(consumer, topicPartition, gracefulShutdownToken);
 
                     _partitionConsumers[topicPartition] = consumerHandler;
                     consumer.Resume([topicPartition]);
@@ -203,21 +200,25 @@ public sealed class ConcurrentKafkaConsumer
             }
         }
 
-        // Closes invokes the partitions revoked handler which will wait for all inflight messaging
+        // Calling "Close" invokes the partitions revoked handler which will wait for all inflight messaging
         // to complete processing
         consumer.Close();
     }
 
-    private PartitionConsumerHandle CreatePartitionConsumerHandle(IConsumer<string, byte[]> consumer, TopicPartition topicPartition, CancellationToken gracefulShutdownToken)
+    private TopicPartitionConsumerHandle CreatePartitionConsumerHandle(
+        IConsumer<string, byte[]> consumer,
+        TopicPartition topicPartition,
+        CancellationToken gracefulShutdownToken)
     {
-        var consumerHandler = new PartitionConsumerHandle(
+        var consumerHandler = new TopicPartitionConsumerHandle(
             gracefulShutdownToken,
             consumeResult =>
             {
                 consumer.StoreOffset(consumeResult);
                 _logger.LogDebug("Stored {TopicPartitionOffset}", consumeResult.TopicPartitionOffset);
             },
-            _topics[topicPartition.Topic]);
+            _handleTopicPartition,
+            topicPartition);
 
         consumerHandler.ProcessTask.ContinueWith(_ =>
         {
@@ -227,16 +228,16 @@ public sealed class ConcurrentKafkaConsumer
         return consumerHandler;
     }
 
-    class PartitionConsumerHandle : IDisposable
+    class TopicPartitionConsumerHandle : IDisposable
     {
         private readonly CancellationTokenSource _gracefulShutdownCts;
         private readonly Channel<ConsumeResult<string, byte[]>> _channel;
 
-        public PartitionConsumerHandle(
+        public TopicPartitionConsumerHandle(
             CancellationToken stoppingToken,
             Action<ConsumeResult<string, byte[]>> storeOffset,
-            Func<PartitionConsumer, Task> partitionConsumerProcessPartition
-            )
+            HandleTopicPartition partitionConsumerProcessPartition,
+            TopicPartition topicPartition)
         {
             _gracefulShutdownCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
 
@@ -247,15 +248,16 @@ public sealed class ConcurrentKafkaConsumer
                 AllowSynchronousContinuations = false,
             });
 
-            PartitionConsumer = new PartitionConsumer(
+            PartitionConsumer = new TopicPartitionConsumer(
                 _gracefulShutdownCts.Token,
                 _channel.Reader,
-                storeOffset);
+                storeOffset,
+                topicPartition);
 
             ProcessTask = partitionConsumerProcessPartition(PartitionConsumer);
         }
 
-        public PartitionConsumer PartitionConsumer { get; }
+        public TopicPartitionConsumer PartitionConsumer { get; }
 
         public Task ProcessTask { get; }
 

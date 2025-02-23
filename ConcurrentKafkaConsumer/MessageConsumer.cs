@@ -2,14 +2,14 @@
 
 namespace Brnls;
 
-class MessageConsumer
+public class MessageConsumer
 {
-    private readonly PartitionConsumer _partitionConsumer;
+    private readonly TopicPartitionConsumer _partitionConsumer;
     private readonly MessageHandler _handler;
     private readonly ILogger<MessageConsumer> _logger;
 
     public MessageConsumer(
-        PartitionConsumer partitionConsumer,
+        TopicPartitionConsumer partitionConsumer,
         MessageHandler handler,
         ILogger<MessageConsumer> logger)
     {

@@ -4,16 +4,16 @@ using Microsoft.Extensions.Logging;
 
 namespace Brnls;
 
-class BatchMessageConsumer
+public class BatchMessageConsumer
 {
-    private readonly PartitionConsumer _partitionConsumer;
+    private readonly TopicPartitionConsumer _partitionConsumer;
     private readonly BatchMessageHandler _handler;
     private readonly int _maxBatch;
     private readonly ILogger<BatchMessageConsumer> _logger;
     private readonly List<ConsumeResult<string, byte[]>> _buffer;
 
     public BatchMessageConsumer(
-        PartitionConsumer partitionConsumer,
+        TopicPartitionConsumer partitionConsumer,
         BatchMessageHandler handler,
         int maxBatch,
         ILogger<BatchMessageConsumer> logger)

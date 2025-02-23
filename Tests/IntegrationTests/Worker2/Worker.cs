@@ -24,31 +24,26 @@ public class Worker : BackgroundService
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var host = _config["worker_host"] ?? "undefined";
-        var config = new ConcurrentKafkaConsumerConfig
+        var config = new ConsumerConfig()
         {
-            ConsumerConfig = new ConsumerConfig()
-            {
-                // Because we are buffering messages in memory ourselves we don't want the internal 
-                // queues to buffer as much (QueuedMaxMessagesKbytes defaults to 65536 Kb)
-                //QueuedMaxMessagesKbytes = 10000,
-                BootstrapServers = "localhost:9092",
-                GroupId = "consumer-1",
-                AutoOffsetReset = AutoOffsetReset.Latest,
-                EnableAutoOffsetStore = false,
-                EnableAutoCommit = true,
-                PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky,
-                StatisticsIntervalMs = 5000,
-                //Debug = "consumer,topic"
-            },
+            // Because we are buffering messages in memory ourselves we don't want the internal 
+            // queues to buffer as much (QueuedMaxMessagesKbytes defaults to 65536 Kb)
+            //QueuedMaxMessagesKbytes = 10000,
+            BootstrapServers = "localhost:9092",
+            GroupId = "consumer-1",
+            AutoOffsetReset = AutoOffsetReset.Latest,
+            EnableAutoOffsetStore = false,
+            EnableAutoCommit = true,
+            PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky,
+            StatisticsIntervalMs = 5000,
+            //Debug = "consumer,topic"
         };
 
         _logger.LogInformation("Starting receiver");
 
-        var topics = new[] {
-            TopicConfiguration.MessageConsumer(
-                "topic-name",
-                _loggerFactory,
-                async (msg, token) =>
+        var consumer = new KafkaConsumer(config, ["topic-name", "batch-topic"], _loggerFactory, tpc => tpc.TopicPartition.Topic switch
+            {
+                "topic-name" => new MessageConsumer(tpc, async (msg, token) =>
                 {
                     using var cts = new CancellationTokenSource();
                     await using var _ = token.Register(() => cts.CancelAfter(TimeSpan.FromSeconds(3)));
@@ -65,20 +60,15 @@ public class Worker : BackgroundService
                     });
                     await context.SaveChangesAsync(cts.Token);
                     await Task.Delay(100, cts.Token);
-                }),
-
-            TopicConfiguration.BatchMessageConsumer(
-                "batch-topic",
-                20,
-                _loggerFactory,
-                async (batch, storePartialSuccessOffset, token) =>
+                }, _loggerFactory.CreateLogger<MessageConsumer>()).ProcessPartition(),
+                "batch-topic" => new BatchMessageConsumer(tpc, async (batch, storePartialSuccessOffset, token) =>
                 {
-                    if(batch.Count == 0) throw new Exception("expected item in batch");
+                    if (batch.Count == 0) throw new Exception("expected item in batch");
                     using var cts = new CancellationTokenSource();
                     await using var _ = token.Register(() => cts.CancelAfter(TimeSpan.FromSeconds(5)));
                     using var scope = _serviceScopeFactory.CreateScope();
                     var context = scope.ServiceProvider.GetRequiredService<WorkerContext>();
-                    foreach(var msg in batch)
+                    foreach (var msg in batch)
                     {
                         context.Results.Add(new Result
                         {
@@ -92,10 +82,12 @@ public class Worker : BackgroundService
                     _logger.LogInformation("Consumed batch {TopicPartition}", batch[^1].TopicPartitionOffset);
                     await context.SaveChangesAsync(cts.Token);
                     await Task.Delay(100, cts.Token);
-                })
-        };
-
-        var consumer = new ConcurrentKafkaConsumer(config, topics, _loggerFactory, s =>
+                },
+                20,
+                _loggerFactory.CreateLogger<BatchMessageConsumer>()).ProcessPartition(),
+                _ => throw new Exception("Unknown topic")
+            },
+        s =>
         {
             using var scope = _serviceScopeFactory.CreateScope();
             var json = JsonDocument.Parse(s);
