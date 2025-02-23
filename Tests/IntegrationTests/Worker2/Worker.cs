@@ -41,7 +41,43 @@ public class Worker : BackgroundService
 
         _logger.LogInformation("Starting receiver");
 
-        var consumer = new KafkaConsumer(config, ["topic-name", "batch-topic"], _loggerFactory, tpc => tpc.TopicPartition.Topic switch
+        var consumer = new KafkaConsumer(config, ["topic-name", "batch-topic"], _loggerFactory, tpc => HandleTopicPartition(tpc),
+        s =>
+        {
+            using var scope = _serviceScopeFactory.CreateScope();
+            var json = JsonDocument.Parse(s);
+            var workerContext = scope.ServiceProvider.GetRequiredService<WorkerContext>();
+            workerContext.Stats.Add(new Stats
+            {
+                Host = host,
+                Value = JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true }),
+                CreatedAt = DateTime.UtcNow,
+            });
+            workerContext.SaveChanges();
+
+        });
+
+        // The consume method should use its own thread (create a new thread or use Task.Factory.StartNew with TaskCreationOptions.LongRunning)
+        // to avoid blocking a thread pool thread.
+        await Task.Factory.StartNew(() =>
+        {
+            try
+            {
+                // This call will consume until the stoppingToken is cancelled. Messages in flight will be given time to complete.
+                // but new messages will not be passed to the message handler. If the handler
+                // doesn't complete in GracefulShutdownTimeout time, the token will trigger
+                //
+                // Offsets are stored each time the message handler is invoked. The cancellation token passed to the handler is the
+                // forceful shutdown token. Once the host stops, the receiver will stop consuming new messages. If the handler
+                // doesn't complete GracefulShutdownTimeout time, the token will trigger
+                consumer.Consume(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
+        }, TaskCreationOptions.LongRunning);
+
+        Task HandleTopicPartition(TopicPartitionConsumer tpc)
+        {
+            return tpc.TopicPartition.Topic switch
             {
                 "topic-name" => new MessageConsumer(tpc, async (msg, token) =>
                 {
@@ -86,38 +122,7 @@ public class Worker : BackgroundService
                 20,
                 _loggerFactory.CreateLogger<BatchMessageConsumer>()).ProcessPartition(),
                 _ => throw new Exception("Unknown topic")
-            },
-        s =>
-        {
-            using var scope = _serviceScopeFactory.CreateScope();
-            var json = JsonDocument.Parse(s);
-            var workerContext = scope.ServiceProvider.GetRequiredService<WorkerContext>();
-            workerContext.Stats.Add(new Stats
-            {
-                Host = host,
-                Value = JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true }),
-                CreatedAt = DateTime.UtcNow,
-            });
-            workerContext.SaveChanges();
-
-        });
-
-        // The consume method should use its own thread (create a new thread or use Task.Factory.StartNew with TaskCreationOptions.LongRunning)
-        // to avoid blocking a thread pool thread.
-        await Task.Factory.StartNew(() =>
-        {
-            try
-            {
-                // This call will consume until the stoppingToken is cancelled. Messages in flight will be given time to complete.
-                // but new messages will not be passed to the message handler. If the handler
-                // doesn't complete in GracefulShutdownTimeout time, the token will trigger
-                //
-                // Offsets are stored each time the message handler is invoked. The cancellation token passed to the handler is the
-                // forceful shutdown token. Once the host stops, the receiver will stop consuming new messages. If the handler
-                // doesn't complete GracefulShutdownTimeout time, the token will trigger
-                consumer.Consume(stoppingToken);
-            }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
-        }, TaskCreationOptions.LongRunning);
+            };
+        }
     }
 }

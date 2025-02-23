@@ -95,6 +95,8 @@ public sealed class KafkaConsumer
                             // if it gets reassigned to this consumer, processing continues.
                             c.Resume([topicPartition.TopicPartition]);
                         }
+                        _partitionConsumers[topicPartition.TopicPartition].Dispose();
+                        _partitionConsumers.Remove(topicPartition.TopicPartition);
                     }
 
                     _logger.LogDebug("Revoke partitions completed");
