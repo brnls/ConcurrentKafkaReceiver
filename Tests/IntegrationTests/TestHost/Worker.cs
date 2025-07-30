@@ -23,7 +23,9 @@ class Worker : BackgroundService
         _logger.LogInformation("Worker running at: {time}", DateTimeOffset.Now);
         var processTasks = Channel.CreateUnbounded<Task>();
 
-        _ = RunConsumer("only host", stoppingToken);
+        await LoadTestData(stoppingToken);
+        //await Task.Delay(Timeout.Infinite, stoppingToken);
+        await RunConsumer("only host", stoppingToken);
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
@@ -56,6 +58,15 @@ class Worker : BackgroundService
             }
         }
 
+        async Task LoadTestData(CancellationToken stoppingToken)
+        {
+            var dir = "C:/Code/ConcurrentKafkaReceiver/Tests/IntegrationTests/Producer1/bin/release/net9.0/";
+            var processTask = Cli.Wrap(Path.Combine(dir, "Producer1.exe"))
+                .WithWorkingDirectory(dir)
+                .WithStandardOutputPipe(PipeTarget.Null)
+                .ExecuteAsync(default, stoppingToken);
+            await processTask;
+        }
         async Task RunConsumer(string host, CancellationToken stoppingToken)
         {
             _logger.LogInformation("Starting host {host}", host);

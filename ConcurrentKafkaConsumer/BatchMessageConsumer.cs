@@ -40,10 +40,8 @@ public class BatchMessageConsumer
                 ConsumerMetrics.BatchConsumerBatchSize.Record(_buffer.Count);
                 await _handler(
                     _buffer,
-                    StorePartialSuccessOffset,
+                    StoreOffset,
                     _partitionConsumer.GracefulShutdownToken);
-                _partitionConsumer.StoreOffset(_buffer[^1]);
-                _buffer.Clear();
             }
             catch (OperationCanceledException) when (_partitionConsumer.GracefulShutdownToken.IsCancellationRequested) { }
             catch (Exception ex)
@@ -56,7 +54,7 @@ public class BatchMessageConsumer
         }
     }
 
-    void StorePartialSuccessOffset(ConsumeResult<string, byte[]> cr)
+    void StoreOffset(ConsumeResult<string, byte[]> cr)
     {
         var storedOffsetIndex = _buffer.FindIndex(c => c.Offset == cr.Offset);
         _buffer.RemoveRange(0, storedOffsetIndex + 1);

@@ -1,4 +1,6 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Confluent.Kafka;
+
+using Microsoft.Extensions.Logging;
 
 namespace Brnls;
 
@@ -25,9 +27,7 @@ public class MessageConsumer
             if (!_partitionConsumer.MessageChanngel.TryPeek(out var item)) continue;
             try
             {
-                await _handler(item, _partitionConsumer.GracefulShutdownToken);
-                _partitionConsumer.MessageChanngel.TryRead(out var _);
-                _partitionConsumer.StoreOffset(item);
+                await _handler(item, StoreOffset, _partitionConsumer.GracefulShutdownToken);
             }
             catch (OperationCanceledException e) when (e.CancellationToken == _partitionConsumer.GracefulShutdownToken) { }
             catch (Exception ex)
@@ -38,5 +38,11 @@ public class MessageConsumer
                 await Task.Delay(TimeSpan.FromSeconds(30), _partitionConsumer.GracefulShutdownToken).ContinueWith(_ => { });
             }
         }
+    }
+
+    void StoreOffset(ConsumeResult<string, byte[]> consumeResult)
+    {
+        _partitionConsumer.MessageChanngel.TryRead(out var _);
+        _partitionConsumer.StoreOffset(consumeResult);
     }
 }

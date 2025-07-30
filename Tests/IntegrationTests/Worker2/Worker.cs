@@ -21,17 +21,25 @@ public class Worker : BackgroundService
         _config = config;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        return Task.CompletedTask;
+    }
+
+    public async Task Run(
+        CancellationToken stoppingToken,
+        Dictionary<string, string> rawConfig,
+        int tpBuffer)
     {
         var host = _config["worker_host"] ?? "undefined";
-        var config = new ConsumerConfig()
+        var config = new ConsumerConfig(rawConfig)
         {
             // Because we are buffering messages in memory ourselves we don't want the internal 
             // queues to buffer as much (QueuedMaxMessagesKbytes defaults to 65536 Kb)
             //QueuedMaxMessagesKbytes = 10000,
             BootstrapServers = "localhost:9092",
             GroupId = "consumer-1",
-            AutoOffsetReset = AutoOffsetReset.Latest,
+            AutoOffsetReset = AutoOffsetReset.Earliest,
             EnableAutoOffsetStore = false,
             EnableAutoCommit = true,
             PartitionAssignmentStrategy = PartitionAssignmentStrategy.CooperativeSticky,
@@ -41,24 +49,34 @@ public class Worker : BackgroundService
 
         _logger.LogInformation("Starting receiver");
 
-        var consumer = new KafkaConsumer(config, ["topic-name", "batch-topic"], _loggerFactory, tpc => HandleTopicPartition(tpc),
-        s =>
-        {
-            using var scope = _serviceScopeFactory.CreateScope();
-            var json = JsonDocument.Parse(s);
-            var workerContext = scope.ServiceProvider.GetRequiredService<WorkerContext>();
-            workerContext.Stats.Add(new Stats
+        var consumer = new KafkaConsumer(
+            config,
+            ["topic-name" ],
+            _loggerFactory,
+            HandleTopicPartition,
+            tpBuffer,
+            s =>
             {
-                Host = host,
-                Value = JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true }),
-                CreatedAt = DateTime.UtcNow,
-            });
-            workerContext.SaveChanges();
+                using var scope = _serviceScopeFactory.CreateScope();
+                var json = JsonDocument.Parse(s);
+                var workerContext = scope.ServiceProvider.GetRequiredService<WorkerContext>();
+                workerContext.Stats.Add(new Stats
+                {
+                    Host = host,
+                    Value = JsonSerializer.Serialize(json, new JsonSerializerOptions { WriteIndented = true }),
+                    CreatedAt = DateTime.UtcNow,
+                });
+                workerContext.SaveChanges();
 
+            });
+
+        var sconsumer = new SimplerConsumer(config, ["topic-name", "batch-topic"], _loggerFactory, async (cr, so, ct) =>
+        {
+            await HandleMessage(cr, so, ct);
         });
 
         // The consume method should use its own thread (create a new thread or use Task.Factory.StartNew with TaskCreationOptions.LongRunning)
-        // to avoid blocking a thread pool thread.
+        // to avoid blocking a thread pool thread., "batch-topic", "topic1", "topic2", "topic3", "topic4" 
         await Task.Factory.StartNew(() =>
         {
             try
@@ -71,6 +89,7 @@ public class Worker : BackgroundService
                 // forceful shutdown token. Once the host stops, the receiver will stop consuming new messages. If the handler
                 // doesn't complete GracefulShutdownTimeout time, the token will trigger
                 consumer.Consume(stoppingToken);
+                //sconsumer.Consume(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { }
         }, TaskCreationOptions.LongRunning);
@@ -79,24 +98,7 @@ public class Worker : BackgroundService
         {
             return tpc.TopicPartition.Topic switch
             {
-                "topic-name" => new MessageConsumer(tpc, async (msg, token) =>
-                {
-                    using var cts = new CancellationTokenSource();
-                    await using var _ = token.Register(() => cts.CancelAfter(TimeSpan.FromSeconds(3)));
-                    using var scope = _serviceScopeFactory.CreateScope();
-                    var context = scope.ServiceProvider.GetRequiredService<WorkerContext>();
-                    _logger.LogInformation("Consumed event from topic {TopicPartition} with value {value}", msg.TopicPartitionOffset, Encoding.UTF8.GetString(msg.Message.Value));
-                    context.Results.Add(new Result
-                    {
-                        Topic = msg.Topic,
-                        MessageId = msg.Message.Key,
-                        Offset = (int)msg.Offset.Value,
-                        Partition = msg.Partition.Value,
-                        Host = _config["worker_host"]!
-                    });
-                    await context.SaveChangesAsync(cts.Token);
-                    await Task.Delay(100, cts.Token);
-                }, _loggerFactory.CreateLogger<MessageConsumer>()).ProcessPartition(),
+                "topic-name" => new MessageConsumer(tpc, HandleMessage, _loggerFactory.CreateLogger<MessageConsumer>()).ProcessPartition(),
                 "batch-topic" => new BatchMessageConsumer(tpc, async (batch, storePartialSuccessOffset, token) =>
                 {
                     if (batch.Count == 0) throw new Exception("expected item in batch");
@@ -124,5 +126,27 @@ public class Worker : BackgroundService
                 _ => throw new Exception("Unknown topic")
             };
         }
+    }
+
+    private async Task HandleMessage(
+        ConsumeResult<string, byte[]> msg,
+        Action<ConsumeResult<string, byte[]>> storeOffset,
+        CancellationToken token)
+    {
+        using var scope = _serviceScopeFactory.CreateScope();
+        var context = scope.ServiceProvider.GetRequiredService<WorkerContext>();
+        //_logger.LogInformation("Consumed event from topic {TopicPartition} with value {value}", msg.TopicPartitionOffset, Encoding.UTF8.GetString(msg.Message.Value));
+        //context.Results.Add(new Result
+        //{
+        //    Topic = msg.Topic,
+        //    MessageId = msg.Message.Key,
+        //    Offset = (int)msg.Offset.Value,
+        //    Partition = msg.Partition.Value,
+        //    Host = _config["worker_host"]!
+        //});
+        //await context.SaveChangesAsync(token);
+        await Task.Delay(7, token);
+        storeOffset(msg);
+        Telemetry.RecordProcessedItems(1);
     }
 }

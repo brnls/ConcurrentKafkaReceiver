@@ -10,7 +10,7 @@ public class AspireDashboardService : IContainerInit
     {
         _container = new ContainerBuilder()
             .WithName("aspire-dashboard")
-            .WithImage("mcr.microsoft.com/dotnet/aspire-dashboard:9.0")
+            .WithImage("mcr.microsoft.com/dotnet/aspire-dashboard:9.1")
             .WithPortBinding(18888, 18888)
             .WithPortBinding(4317, 18889)
             .WithEnvironment(new Dictionary<string, string>

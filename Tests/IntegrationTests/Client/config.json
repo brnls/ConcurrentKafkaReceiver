@@ -1,0 +1,6 @@
+{
+	"queued.max.messages.kbytes": "100",
+	"max.partition.fetch.bytes": "102400",
+	"queued.min.messages": "10"
+}
+

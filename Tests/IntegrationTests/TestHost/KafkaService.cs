@@ -39,13 +39,14 @@ sealed class KafkaService : IContainerInit
     public async Task InitAsync(CancellationToken token)
     {
         await _kafka.StartAsync(token);
-        foreach (var topic in new List<string> { "topic-name", "batch-topic" })
+        foreach (var topic in new List<string> { "topic-name" })
         {
             var sb = new StringBuilder();
             var result = await Cli.Wrap("docker")
-                .WithArguments($"exec {_kafka.Name} kafka-topics --create --topic {topic} --partitions 7 --replication-factor 1 --bootstrap-server localhost:9092")
+                .WithArguments($"exec {_kafka.Name} kafka-topics --create --topic {topic} --partitions 1 --replication-factor 1 --bootstrap-server localhost:9092")
                 .WithStandardOutputPipe(PipeTarget.ToStream(Stream.Null))
                 .ExecuteAsync(token);
+            Console.WriteLine($"Created topic {topic}");
         }
     }
 
